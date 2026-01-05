@@ -705,6 +705,18 @@ function doStats(data, users) {
 		individualPointHistory_elo[user.name] = [[0,0]];
 		individualPointHistory_domp[user.name] = [[0,0]];
 	}
+	
+		// ========== TrueSkill initialization ==========
+	let trueSkillPoints = {};
+	let individualPointHistory_ts = {};
+
+	for (let user of users) {
+		// Standard TrueSkill defaults: mu = 25, sigma = 25/3
+		trueSkillPoints[user.name] = { mu: 25, sigma: 25 / 3 };
+		// Store conservative rating history (mu - 3*sigma); start at 0
+		individualPointHistory_ts[user.name] = [[0, 0]];
+	}
+
 
 	let isBock = false;
 	let rnd = 0;
@@ -843,6 +855,80 @@ function doStats(data, users) {
 				}
 			}
 		}
+
+		// ========== TrueSkill rating update ==========
+		// Sort players by round points (best to worst)
+		const tsPlayersList = Object.keys(round.points).sort((a, b) => round.points[b] - round.points[a]);
+
+		for (let player of tsPlayersList) {
+			const oldTS = trueSkillPoints[player];
+			let muChange = 0;
+			let surpriseFactor = 0;
+
+			for (let opponent of tsPlayersList) {
+				if (opponent === player) continue;
+
+				const opponentTS = trueSkillPoints[opponent];
+				const playerPoints = round.points[player];
+				const opponentPoints = round.points[opponent];
+
+				// Approximate performance difference with Gaussian/logistic mix
+				const muDiff = opponentTS.mu - oldTS.mu;
+				const sigmaDiff = Math.sqrt(
+					oldTS.sigma * oldTS.sigma +
+					opponentTS.sigma * opponentTS.sigma +
+					2 * Math.pow(25/6, 2)
+				);
+				const winProb = 1 / (1 + Math.exp(muDiff / sigmaDiff));
+
+				const playerWon = playerPoints > opponentPoints;
+				if (playerWon) {
+					// Unexpected wins give larger updates (1 - winProb)
+					muChange += oldTS.sigma * (1 - winProb) * 0.08;
+					surpriseFactor += (1 - winProb);
+				} else if (playerPoints < opponentPoints) {
+					// Losses reduce mu proportional to how likely you were to win
+					muChange -= oldTS.sigma * winProb * 0.08;
+					surpriseFactor += winProb;
+				}
+				// If equal points, treat as neutral: no change
+			}
+
+			const avgSurprise = tsPlayersList.length > 1
+				? surpriseFactor / (tsPlayersList.length - 1)
+				: 0;
+
+			// Sigma evolution: decays toward minSigma, adjusted by surprise
+			const minSigma = (25 / 3) * 0.15;
+			const maxSigma = 25 / 3;
+			const sigmaDrift = -0.008 * (oldTS.sigma - minSigma);
+			const surpriseAdjustment = 0.02 * (avgSurprise - 0.5);
+
+			let newSigma = oldTS.sigma + sigmaDrift + surpriseAdjustment;
+
+			// Bock rounds: dampen changes (higher randomness)
+			if (isBock) {
+				muChange *= 0.7;
+				newSigma = oldTS.sigma + (sigmaDrift + surpriseAdjustment) * 0.8;
+			}
+
+			// Clamp sigma and mu to reasonable ranges
+			newSigma = Math.max(minSigma, Math.min(maxSigma, newSigma));
+			const newMu = Math.max(0, Math.min(50, oldTS.mu + muChange));
+
+			trueSkillPoints[player].mu = newMu;
+			trueSkillPoints[player].sigma = newSigma;
+
+			// Conservative rating for history: mu - 3*sigma
+			const conservativeRating = newMu - 3 * newSigma;
+			let oldValTS = individualPointHistory_ts[player][individualPointHistory_ts[player].length-1][1];
+			individualPointHistory_ts[player].push([rnd, conservativeRating]);
+		}
+
+		//END OF TRUE SKILL CALCS
+
+
+		
 		if (round.bock > 0) {
 			isBock = true;
 		} else {
@@ -953,6 +1039,29 @@ function doStats(data, users) {
 			</div>
 		`;
 	}
+		// ========== TrueSkill charts ==========
+	const trueSkillDisplay = {};
+	for (let user of userNames) {
+		const ts = trueSkillPoints[user];
+		const conservative = Math.round((ts.mu - 3 * ts.sigma) * 10) / 10;
+		trueSkillDisplay[user] = conservative;
+	}
+
+	new BarChart("TrueSkill Rating", trueSkillDisplay, document.getElementById("trueSkill"), false);
+	new Graph("TrueSkill History", individualPointHistory_ts, document.getElementById("trueSkillHistory"));
+
+	// Optional: separate mu and sigma charts
+	const trueSkillMu = {};
+	const trueSkillSigma = {};
+	for (let user of userNames) {
+		const ts = trueSkillPoints[user];
+		trueSkillMu[user] = Math.round(ts.mu * 10) / 10;
+		trueSkillSigma[user] = Math.round(ts.sigma * 100) / 100;
+	}
+
+	new BarChart("TrueSkill μ (Mean)", trueSkillMu, document.getElementById("trueSkillMu"), false);
+	new BarChart("TrueSkill σ (Uncertainty)", trueSkillSigma, document.getElementById("trueSkillSigma"), false);
+
 }
 
 function toggleContents() {
